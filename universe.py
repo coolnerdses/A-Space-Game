@@ -3,7 +3,29 @@ import random
 
 STAR_TYPES = ["Red Dwarf", "Yellow Star", "Blue Giant", "White Dwarf", "Neutron Star"]
 PLANET_TYPES = ["Rocky", "Gas Giant", "Ice World", "Volcanic", "Ocean", "Desert"]
-RESOURCES = ["Iron", "Titanium", "Helium-3", "Water Ice", "Silicon", "Rare Crystals"]
+
+RESOURCE_ABUNDANCE = {
+    "Oxygen": 460000,
+    "Silicon": 282000,
+    "Aluminum": 82000,
+    "Iron": 56000,
+    "Calcium": 42000,
+    "Sodium": 23000,
+    "Magnesium": 23000,
+    "Potassium": 21000,
+    "Titanium": 5700,
+    "Hydrogen": 1400,
+    "Carbon": 200,
+    "Nickel": 84,
+    "Zinc": 70,
+    "Copper": 60,
+    "Cobalt": 25,
+    "Lead": 14,
+    "Tin": 2.3,
+    "Silver": 0.075,
+    "Platinum": 0.005,
+    "Gold": 0.004,
+}
 
 STAR_DATA = {
     "Red Dwarf":    {"temp_k": (2300, 3900),      "mass_msun": (0.08, 0.45)},
@@ -13,12 +35,15 @@ STAR_DATA = {
     "Neutron Star": {"temp_k": (600000, 1000000), "mass_msun": (1.4, 2.2)},
 }
 
+# Habitable zone, in real astronomical units (AU). Scales with a star's
+# luminosity — cooler/dimmer stars pull it in close, hotter/brighter
+# stars push it far out. Sun's real HZ is roughly 0.95-1.4 AU.
 STAR_HABITABLE_ZONE = {
-    "Red Dwarf":    (20, 45),
-    "Yellow Star":  (150, 260),
-    "Blue Giant":   (650, 950),
-    "White Dwarf":  (5, 15),
-    "Neutron Star": (0, 0),
+    "Red Dwarf":    (0.05, 0.4),
+    "Yellow Star":  (0.95, 1.4),
+    "Blue Giant":   (20.0, 100.0),
+    "White Dwarf":  (0.005, 0.02),
+    "Neutron Star": (0.0, 0.0),
 }
 
 ATMOSPHERE_CHANCE = {
@@ -30,8 +55,19 @@ ATMOSPHERE_CHANCE = {
     "Gas Giant": 1.0,
 }
 
-# Rocky worlds branch on atmosphere (craters vs. eroded terrain); other
-# types don't need that distinction for now.
+# Realistic-ish orbital distance range per planet type, in AU. Rocky/
+# volcanic/desert/ocean worlds cluster close to the star (like the
+# terrestrial planets); ice worlds and gas giants spawn much farther
+# out (like the outer solar system).
+ORBIT_AU_RANGES = {
+    "Rocky": (0.3, 2.2),
+    "Volcanic": (0.2, 1.8),
+    "Desert": (0.5, 2.5),
+    "Ocean": (0.7, 2.8),
+    "Ice World": (2.5, 15.0),
+    "Gas Giant": (4.0, 30.0),
+}
+
 TERRAIN_BY_PLANET_TYPE = {
     "Rocky": {
         True:  ["Plains", "Mountains", "Canyon", "Highlands"],
@@ -55,23 +91,12 @@ RESOURCE_ESTIMATE_LABELS = [
 
 
 def _seed_for(coords):
-    """
-    Turn any-length coordinate tuple into a deterministic integer seed.
-    Same input -> same seed, every time.
-    """
     key = ":".join(str(c) for c in coords)
     digest = hashlib.sha256(key.encode()).hexdigest()
     return int(digest[:16], 16)
 
-<<<<<<< Updated upstream
-=======
 
 def generate_planet_resources(coords):
-    """
-    Every planet has a little of everything, weighted by real crustal
-    abundance, plus one randomly-rolled 'rich deposit' element that's
-    unusually concentrated there.
-    """
     rng = random.Random(_seed_for((*coords, "resources")))
     resources = {}
     for element, base_abundance in RESOURCE_ABUNDANCE.items():
@@ -85,12 +110,7 @@ def generate_planet_resources(coords):
     return resources, rich_element
 
 
->>>>>>> Stashed changes
 def generate_system(coords):
-    """
-    Deterministically generate a star system at the given (x, y, z) coordinate.
-    Calling this twice with the same coords always returns the same system.
-    """
     seed = _seed_for(coords)
     rng = random.Random(seed)
 
@@ -99,45 +119,43 @@ def generate_system(coords):
 
     planets = []
     for i in range(num_planets):
-        planet_seed_coords = (coords[0], coords[1], coords[2], i)  # unique per planet
+        planet_seed_coords = (coords[0], coords[1], coords[2], i)
         planet_rng = random.Random(_seed_for(planet_seed_coords))
         resources, rich_element = generate_planet_resources(planet_seed_coords)
 
-<<<<<<< Updated upstream
-        planets.append({
-            "name": f"{coords[0]}-{coords[1]}-{coords[2]}-P{i+1}",
-            "type": planet_rng.choice(PLANET_TYPES),
-            "resources": planet_rng.sample(RESOURCES, k=planet_rng.randint(1, 3)),
-            "size": planet_rng.randint(1000, 20000),  # arbitrary unit, e.g. km radius
-        })
-=======
         ptype = planet_rng.choice(PLANET_TYPES)
         has_atmosphere = planet_rng.random() < ATMOSPHERE_CHANCE.get(ptype, 0.3)
+        lo_au, hi_au = ORBIT_AU_RANGES.get(ptype, (0.3, 10.0))
+        orbit_au = planet_rng.uniform(lo_au, hi_au)
 
         planets.append({
-            "name": f"{coords[0]}-{coords[1]}-{coords[2]}-P{i+1}",
-            "index": i,
             "type": ptype,
             "has_atmosphere": has_atmosphere,
             "resources": resources,
             "rich_deposit": rich_element,
             "size": planet_rng.randint(1000, 20000),
-            "orbit_radius": 80 + i * 60 + planet_rng.uniform(-20, 20),
+            "orbit_au": orbit_au,
             "angle_deg": planet_rng.uniform(0, 360),
         })
 
+    # Order planets by distance from the star, like a real solar system
+    # (innermost first), and assign stable names/indices to match.
+    planets.sort(key=lambda p: p["orbit_au"])
+    for new_index, planet in enumerate(planets):
+        planet["index"] = new_index
+        planet["name"] = f"{coords[0]}-{coords[1]}-{coords[2]}-P{new_index+1}"
+
     hz_inner, hz_outer = STAR_HABITABLE_ZONE.get(star_type, (0, 0))
     star_info = STAR_DATA.get(star_type, {})
->>>>>>> Stashed changes
 
     return {
         "coords": coords,
         "star_type": star_type,
+        "star_temp_k": star_info.get("temp_k", (0, 0)),
+        "star_mass_msun": star_info.get("mass_msun", (0, 0)),
+        "habitable_zone": {"inner": hz_inner, "outer": hz_outer},  # in AU
         "planets": planets,
     }
-<<<<<<< Updated upstream
-def star_exists(coords, chance=0.75):
-=======
 
 
 def _label_for_ratio(ratio):
@@ -149,12 +167,6 @@ def _label_for_ratio(ratio):
 
 
 def estimate_system_resources(coords):
-    """
-    A rough, sensor-based survey estimate — like real spectroscopy, this
-    gives qualitative likelihoods, not exact quantities. The estimated
-    planet count is a fuzzed range, not the precise number — you only
-    get exact data once you actually travel there.
-    """
     full_system = generate_system(coords)
     planets = full_system["planets"]
 
@@ -181,11 +193,6 @@ def estimate_system_resources(coords):
 
 
 def generate_planet_terrain(system_coords, planet_index, planet_type, has_atmosphere):
-    """
-    Deterministic 2D terrain grid for a single planet. Gas giants have
-    no solid ground — tiles are mostly open sky with rare floating
-    'Cloud City' platforms instead of natural terrain features.
-    """
     terrain_entry = TERRAIN_BY_PLANET_TYPE.get(planet_type)
     if isinstance(terrain_entry, dict):
         terrain_options = terrain_entry.get(has_atmosphere, list(terrain_entry.values())[0])
@@ -213,21 +220,12 @@ def generate_planet_terrain(system_coords, planet_index, planet_type, has_atmosp
 
 
 def star_exists(coords, chance=0.075):
->>>>>>> Stashed changes
-    """
-    Deterministic yes/no: does a star exist at this coordinate?
-    Same coords always give the same answer.
-    """
     seed = _seed_for(coords)
     rng = random.Random(seed)
     return rng.random() < chance
 
 
 def generate_region(center, radius):
-    """
-    Scan a cube of coordinates around center, return only cells that
-    actually have a star. Lightweight (no planets) — just enough for a map view.
-    """
     cx, cy, cz = center
     stars = []
     for x in range(cx - radius, cx + radius + 1):

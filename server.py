@@ -1,21 +1,13 @@
 import asyncio
 import json
-<<<<<<< Updated upstream
-from universe import generate_system
-from universe import generate_region
-# Authoritative game state
-=======
 from universe import generate_system, generate_region, estimate_system_resources, generate_planet_terrain
 import db
 
->>>>>>> Stashed changes
 game_state = {
-    "tick": 0,
-    "players": {}
+    "tick": 0
 }
 
 def validate_command(player_id, msg):
-
     if "action" not in msg:
         return False, "Missing 'action' field"
 
@@ -24,10 +16,6 @@ def validate_command(player_id, msg):
                       "get_system_estimate", "get_planet_terrain"):
         return False, f"Unknown action '{action}'"
 
-<<<<<<< Updated upstream
-    if player_id not in game_state["players"]:
-        return False, "Unknown player"
-=======
     if action == "hello":
         if not msg.get("name"):
             return False, "hello requires a name"
@@ -49,7 +37,6 @@ def validate_command(player_id, msg):
         coords = msg.get("params", {}).get("coords")
         if not (isinstance(coords, list) and len(coords) == 3 and all(isinstance(c, int) for c in coords)):
             return False, "coords must be a list of 3 integers"
->>>>>>> Stashed changes
 
     if action == "get_planet_terrain":
         params = msg.get("params", {})
@@ -65,24 +52,7 @@ def validate_command(player_id, msg):
         cost = params.get("cost")
         if not isinstance(cost, (int, float)) or cost <= 0:
             return False, "Invalid or missing cost"
-<<<<<<< Updated upstream
-        if game_state["players"][player_id]["resources"] < cost:
-            return False, "Not enough resources"
-    if action == "get_system":
-        coords = msg.get("params", {}).get("coords")
-        if not (isinstance(coords, list) and len(coords) == 3 and all(isinstance(c, int) for c in coords)):
-           return False, "coords must be a list of 3 integers"
-    if action == "get_region":
-        params = msg.get("params", {})
-        radius = params.get("radius")
-        center = params.get("center")
-        if not (isinstance(center, list) and len(center) == 3):
-            return False, "center must be [x, y, z]"
-        if not isinstance(radius, int) or not (1 <= radius <= 8):
-            return False, "radius must be an int between 1 and 8"
-=======
 
->>>>>>> Stashed changes
     return True, None
 
 async def handle_client(reader, writer):
@@ -106,8 +76,8 @@ async def handle_client(reader, writer):
                     continue
 
                 player_id = msg["name"]
-                if player_id not in game_state["players"]:
-                    game_state["players"][player_id] = {"resources": 100}
+                created = await asyncio.to_thread(db.get_or_create_player, player_id)
+                if created:
                     print(f"New player '{player_id}' connected from {addr}")
                 else:
                     print(f"'{player_id}' reconnected from {addr}")
@@ -120,7 +90,11 @@ async def handle_client(reader, writer):
                 await send_json(writer, {"type": "error", "error": error})
                 continue
 
-            await handle_command(player_id, msg, writer)
+            try:
+                await handle_command(player_id, msg, writer)
+            except Exception as e:
+                print(f"Error handling command from '{player_id}': {e}")
+                await send_json(writer, {"type": "error", "error": "Internal server error"})
     except (asyncio.IncompleteReadError, ConnectionResetError):
         pass
     finally:
@@ -132,31 +106,30 @@ async def handle_command(player_id, msg, writer):
     action = msg["action"]
 
     if action == "get_state":
-        # Only ever send this player their own view + shared info
+        player_data = await asyncio.to_thread(db.get_player_state, player_id)
         await send_json(writer, {
             "type": "state",
-            "data": {
-                "tick": game_state["tick"],
-                "you": game_state["players"][player_id]
-            }
+            "data": {"tick": game_state["tick"], "you": player_data}
         })
+
+    elif action == "build":
+        cost = msg["params"]["cost"]
+        ok, error = await asyncio.to_thread(db.try_spend_resources, player_id, cost)
+        if not ok:
+            await send_json(writer, {"type": "error", "error": error})
+        else:
+            await send_json(writer, {"type": "ack", "action": "build", "ok": True})
+
     elif action == "get_system":
         coords = tuple(msg["params"]["coords"])
         system = generate_system(coords)
         await send_json(writer, {"type": "system", "data": system})
 
-<<<<<<< Updated upstream
-    elif action == "build":
-        cost = msg["params"]["cost"]
-        game_state["players"][player_id]["resources"] -= cost
-        await send_json(writer, {"type": "ack", "action": "build", "ok": True})
-=======
     elif action == "get_system_estimate":
         coords = tuple(msg["params"]["coords"])
         estimate = estimate_system_resources(coords)
         await send_json(writer, {"type": "system_estimate", "data": estimate})
 
->>>>>>> Stashed changes
     elif action == "get_region":
         center = tuple(msg["params"]["center"])
         radius = msg["params"]["radius"]
@@ -187,6 +160,7 @@ async def game_tick_loop():
         await asyncio.sleep(1)
 
 async def main():
+    db.init_db()
     server = await asyncio.start_server(handle_client, '127.0.0.1', 5555)
     asyncio.create_task(game_tick_loop())
     print("Server running on 127.0.0.1:5555")

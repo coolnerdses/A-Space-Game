@@ -17,6 +17,8 @@ sock_file = None
 send_lock = threading.Lock()
 PLAYER_NAME = "Connor"
 
+AU_SCALE = 100  # render units per astronomical unit
+
 def reader_thread():
     while True:
         line = sock_file.readline()
@@ -33,26 +35,36 @@ def writer_thread():
                 sock.sendall((json.dumps(cmd) + "\n").encode())
         except queue.Empty:
             pass
+        except OSError:
+            break
 
         now = time.time()
         if now - last_poll >= POLL_INTERVAL:
-            with send_lock:
-                sock.sendall((json.dumps({"action": "get_state"}) + "\n").encode())
-            last_poll = now
+            try:
+                with send_lock:
+                    sock.sendall((json.dumps({"action": "get_state"}) + "\n").encode())
+                last_poll = now
+            except OSError:
+                break
 
-def project(point, angle_x, angle_y, distance=30, scale=4000):
+def rotate_point(point, angle_x, angle_y):
     x, y, z = point
     cosy, siny = math.cos(angle_y), math.sin(angle_y)
     x, z = x * cosy - z * siny, x * siny + z * cosy
     cosx, sinx = math.cos(angle_x), math.sin(angle_x)
     y, z = y * cosx - z * sinx, y * sinx + z * cosx
+    return x, y, z
 
-    z += distance
+def project_rotated(rx, ry, rz, distance=30, scale=4000):
+    z = rz + distance
     if z < 0.5:
         z = 0.5
-
     factor = scale / z
-    return x * factor, y * factor, z
+    return rx * factor, ry * factor, z
+
+def project(point, angle_x, angle_y, distance=30, scale=4000):
+    rx, ry, rz = rotate_point(point, angle_x, angle_y)
+    return project_rotated(rx, ry, rz, distance, scale)
 
 STAR_COLORS = {
     "Red Dwarf": (255, 100, 80),
@@ -61,8 +73,6 @@ STAR_COLORS = {
     "White Dwarf": (240, 240, 255),
     "Neutron Star": (200, 255, 255),
 }
-<<<<<<< Updated upstream
-=======
 PLANET_COLORS = {
     "Rocky": (180, 140, 100),
     "Gas Giant": (230, 180, 100),
@@ -100,7 +110,8 @@ TERRAIN_COLORS = {
     "Storm Band": (150, 150, 180),
 }
 
->>>>>>> Stashed changes
+PLANET_SPHERE_RADIUS = 220  # render units for the sphere itself
+
 def start_networking():
     global sock, sock_file
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -116,6 +127,7 @@ def main():
     pygame.display.set_caption("A Space Game")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 36)
+    small_font = pygame.font.SysFont(None, 22)
 
     start_networking()
     outgoing.put({"action": "get_region", "params": {"center": [0, 0, 0], "radius": 5}})
@@ -126,13 +138,11 @@ def main():
     view_center = (0, 0, 0)
     star_screen_positions = []
     latest_state = {"tick": 0, "you": {"resources": 0}}
-<<<<<<< Updated upstream
-=======
 
-    view_mode = "universe"        # "universe", "system", or "planet"
+    view_mode = "universe"
     current_system = None
     entering_system = False
-    system_view_radius = 400.0
+    system_view_radius = 400.0  # render units; ~4 AU by default
     system_bodies_screen = []
     system_view_center = (0.0, 0.0)
     focused_body = None
@@ -140,11 +150,11 @@ def main():
     star_screen_pos = None
 
     system_estimate = None
-    estimate_coords = None        # which star's coords the current estimate belongs to
+    estimate_coords = None
 
     entering_planet = False
-    current_planet_terrain = None  # {"planet_name":..., "grid": [[...]]}
->>>>>>> Stashed changes
+    current_planet_terrain = None
+    planet_view_distance = 500.0  # smaller = zoomed in on the sphere
 
     running = True
     while running:
@@ -154,26 +164,6 @@ def main():
 
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_b:
                 outgoing.put({"action": "build", "params": {"cost": 10}})
-<<<<<<< Updated upstream
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_g:
-                outgoing.put({"action": "get_system", "params": {"coords": [6, 75, -34]}})
-            elif event.type == pygame.MOUSEWHEEL:
-                view_radius -= event.y * 0.5
-                view_radius = max(0.5, min(view_radius, 5.0))
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                mx, my = event.pos
-                closest = None
-                closest_dist = 25
-                for sx, sy, star in star_screen_positions:
-                    d = math.hypot(mx - sx, my - sy)
-                    if d < closest_dist:
-                        closest_dist = d
-                        closest = star
-                if closest:
-                    view_center = closest["coords"]
-                    outgoing.put({"action": "get_system", "params": {"coords": list(closest["coords"])}})
-                    outgoing.put({"action": "get_region", "params": {"center": list(closest["coords"]), "radius": 5}})
-=======
 
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_BACKSPACE:
                 if view_mode == "planet":
@@ -192,7 +182,10 @@ def main():
                     view_radius = max(0.5, min(view_radius, 5.0))
                 elif view_mode == "system":
                     system_view_radius -= event.y * 40
-                    system_view_radius = max(50.0, min(system_view_radius, 2000.0))
+                    system_view_radius = max(20.0, min(system_view_radius, 4000.0))
+                elif view_mode == "planet":
+                    planet_view_distance -= event.y * 30
+                    planet_view_distance = max(230.0, min(planet_view_distance, 1500.0))
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = event.pos
@@ -230,8 +223,9 @@ def main():
                             d = math.hypot(mx - sx, my - sy)
                             if d < 25:
                                 angle_rad = math.radians(planet["angle_deg"])
-                                px = planet["orbit_radius"] * math.cos(angle_rad)
-                                pz = planet["orbit_radius"] * math.sin(angle_rad)
+                                orbit_units = planet["orbit_au"] * AU_SCALE
+                                px = orbit_units * math.cos(angle_rad)
+                                pz = orbit_units * math.sin(angle_rad)
                                 hit = {"kind": "planet", "planet": planet, "pos": (px, pz)}
                                 break
 
@@ -243,7 +237,6 @@ def main():
                         )
 
                         if info_panel_open and is_same and hit["kind"] == "planet":
-                            # third click on the same, already-open planet -> drill into terrain
                             entering_planet = True
                             outgoing.put({
                                 "action": "get_planet_terrain",
@@ -263,7 +256,6 @@ def main():
                             else:
                                 focused_body = hit
                                 system_view_center = (0.0, 0.0) if hit["kind"] == "star" else hit["pos"]
->>>>>>> Stashed changes
 
         while not incoming.empty():
             msg = incoming.get()
@@ -271,12 +263,8 @@ def main():
                 latest_state = msg["data"]
             elif msg.get("type") == "error":
                 print("Server error:", msg["error"])
-            elif msg.get("type") == "system":
-                print("System data:", msg["data"])
             elif msg.get("type") == "region":
                 stars = msg["data"]
-<<<<<<< Updated upstream
-=======
             elif msg.get("type") == "system":
                 if entering_system:
                     current_system = msg["data"]
@@ -291,7 +279,6 @@ def main():
                     current_planet_terrain = msg["data"]
                     view_mode = "planet"
                     entering_planet = False
->>>>>>> Stashed changes
 
         keys = pygame.key.get_pressed()
         if keys[pygame.K_LEFT]:
@@ -304,29 +291,23 @@ def main():
             angle_x += 0.02
 
         screen.fill((5, 5, 15))
-        center_x, center_y = screen.get_width() // 2, screen.get_height() // 2
+        sidebar_width = 350 if (view_mode == "system" and info_panel_open) else 0
+        visible_width = screen.get_width() - sidebar_width
+        center_x, center_y = visible_width // 2, screen.get_height() // 2
 
-        cx, cy, cz = view_center
-        projected = []
-        for star in stars:
-            x, y, z = star["coords"]
-            rel = (x - cx, y - cy, z - cz)
-            dist = math.sqrt(rel[0]**2 + rel[1]**2 + rel[2]**2)
-            if dist > view_radius:
-                continue
-            sx, sy, sz = project(rel, angle_x, angle_y)
-            projected.append((sz, sx, sy, star["star_type"], star))
-        projected.sort(key=lambda s: -s[0])
+        if view_mode == "universe":
+            cx, cy, cz = view_center
+            projected = []
+            for star in stars:
+                x, y, z = star["coords"]
+                rel = (x - cx, y - cy, z - cz)
+                dist = math.sqrt(rel[0]**2 + rel[1]**2 + rel[2]**2)
+                if dist > view_radius:
+                    continue
+                sx, sy, sz = project(rel, angle_x, angle_y)
+                projected.append((sz, sx, sy, star["star_type"], star))
+            projected.sort(key=lambda s: -s[0])
 
-<<<<<<< Updated upstream
-        star_screen_positions = []
-        for sz, sx, sy, star_type, star in projected:
-            screen_pos = (int(center_x + sx), int(center_y + sy))
-            radius = max(1, int(200 / sz))
-            color = STAR_COLORS.get(star_type, (255, 255, 255))
-            pygame.draw.circle(screen, color, screen_pos, radius)
-            star_screen_positions.append((screen_pos[0], screen_pos[1], star))
-=======
             star_screen_positions = []
             for sz, sx, sy, star_type, star in projected:
                 screen_pos = (int(center_x + sx), int(center_y + sy))
@@ -335,7 +316,6 @@ def main():
                 pygame.draw.circle(screen, color, screen_pos, radius)
                 star_screen_positions.append((screen_pos[0], screen_pos[1], star))
 
-            # sensor-estimate readout for the currently centered star
             if system_estimate and estimate_coords == tuple(view_center):
                 panel_w = 340
                 pygame.draw.rect(screen, (20, 20, 30), (0, 0, panel_w, screen.get_height()))
@@ -370,18 +350,20 @@ def main():
             if showing_star_panel:
                 hz = current_system["habitable_zone"]
                 if hz["outer"] > 0:
+                    hz_inner_units = hz["inner"] * AU_SCALE
+                    hz_outer_units = hz["outer"] * AU_SCALE
                     zone_surface = pygame.Surface((screen.get_width(), screen.get_height()), pygame.SRCALPHA)
                     ZONE_SEGMENTS = 48
                     outer_pts, inner_pts = [], []
                     for i in range(ZONE_SEGMENTS + 1):
                         theta = 2 * math.pi * i / ZONE_SEGMENTS
-                        ox = hz["outer"] * math.cos(theta) - fx
-                        oz = hz["outer"] * math.sin(theta) - fz
+                        ox = hz_outer_units * math.cos(theta) - fx
+                        oz = hz_outer_units * math.sin(theta) - fz
                         osx, osy, _ = project((ox, 0, oz), angle_x, angle_y, distance=600, scale=scale_factor)
                         outer_pts.append((center_x + osx, center_y + osy))
 
-                        ix = hz["inner"] * math.cos(theta) - fx
-                        iz = hz["inner"] * math.sin(theta) - fz
+                        ix = hz_inner_units * math.cos(theta) - fx
+                        iz = hz_inner_units * math.sin(theta) - fz
                         isx, isy, _ = project((ix, 0, iz), angle_x, angle_y, distance=600, scale=scale_factor)
                         inner_pts.append((center_x + isx, center_y + isy))
 
@@ -397,20 +379,22 @@ def main():
 
             ORBIT_SEGMENTS = 64
             for planet in current_system["planets"]:
+                orbit_units = planet["orbit_au"] * AU_SCALE
                 ring_points = []
                 for i in range(ORBIT_SEGMENTS + 1):
                     theta = 2 * math.pi * i / ORBIT_SEGMENTS
-                    ox = planet["orbit_radius"] * math.cos(theta) - fx
-                    oz = planet["orbit_radius"] * math.sin(theta) - fz
+                    ox = orbit_units * math.cos(theta) - fx
+                    oz = orbit_units * math.sin(theta) - fz
                     rsx, rsy, rsz = project((ox, 0, oz), angle_x, angle_y, distance=600, scale=scale_factor)
                     ring_points.append((center_x + rsx, center_y + rsy))
                 pygame.draw.aalines(screen, (90, 90, 90), False, ring_points)
 
             projected = []
             for planet in current_system["planets"]:
+                orbit_units = planet["orbit_au"] * AU_SCALE
                 angle_rad = math.radians(planet["angle_deg"])
-                px = planet["orbit_radius"] * math.cos(angle_rad) - fx
-                pz = planet["orbit_radius"] * math.sin(angle_rad) - fz
+                px = orbit_units * math.cos(angle_rad) - fx
+                pz = orbit_units * math.sin(angle_rad) - fz
                 sx, sy, sz = project((px, 0, pz), angle_x, angle_y, distance=600, scale=scale_factor)
                 projected.append((sz, sx, sy, planet))
             projected.sort(key=lambda p: -p[0])
@@ -434,6 +418,7 @@ def main():
                         planet["name"],
                         f"Type: {planet['type']}",
                         f"Atmosphere: {'Yes' if planet['has_atmosphere'] else 'None'}",
+                        f"Orbit: {planet['orbit_au']:.3f} AU",
                         f"Size: {planet['size']} km",
                         f"Rich deposit: {planet.get('rich_deposit', '-')}",
                         "",
@@ -453,7 +438,7 @@ def main():
                         f"Mass: {mass[0]}-{mass[1]} solar masses",
                         "",
                         "Habitable zone:",
-                        f"  {hz['inner']}-{hz['outer']} (orbit units)" if hz["outer"] > 0 else "  None",
+                        f"  {hz['inner']:.3f}-{hz['outer']:.3f} AU" if hz["outer"] > 0 else "  None",
                     ]
 
                 y_offset = 20
@@ -461,25 +446,73 @@ def main():
                     text_surface = small_font.render(line, True, (230, 230, 230))
                     screen.blit(text_surface, (panel_x + 15, y_offset))
                     y_offset += 26
->>>>>>> Stashed changes
 
         elif view_mode == "planet" and current_planet_terrain:
             grid = current_planet_terrain["grid"]
             grid_size = len(grid)
-            tile_size = min(screen.get_width(), screen.get_height() - 60) // grid_size
-            grid_pixel_size = tile_size * grid_size
-            offset_x = (screen.get_width() - grid_pixel_size) // 2
-            offset_y = 60
-
-            for tx in range(grid_size):
-                for ty in range(grid_size):
-                    terrain = grid[tx][ty]
-                    color = TERRAIN_COLORS.get(terrain, (200, 200, 200))
-                    rect = (offset_x + tx * tile_size, offset_y + ty * tile_size, tile_size, tile_size)
-                    pygame.draw.rect(screen, color, rect)
 
             title_surface = font.render(current_planet_terrain["planet_name"], True, (230, 230, 230))
-            screen.blit(title_surface, (offset_x, 15))
+            screen.blit(title_surface, (20, 15))
+
+            SPHERE_SCALE = 6000
+            SPHERE_BASE_DISTANCE = 500.0
+            scale_factor = SPHERE_SCALE * (SPHERE_BASE_DISTANCE / planet_view_distance)
+
+            def sphere_point(lat, lon):
+                x = PLANET_SPHERE_RADIUS * math.cos(lat) * math.cos(lon)
+                y = PLANET_SPHERE_RADIUS * math.sin(lat)
+                z = PLANET_SPHERE_RADIUS * math.cos(lat) * math.sin(lon)
+                return x, y, z
+
+            tiles_to_draw = []  # (depth, [screen_points], color)
+
+            for ty in range(grid_size):
+                lat0_deg = -90 + ty / grid_size * 180
+                lat1_deg = -90 + (ty + 1) / grid_size * 180
+                lat_mid = math.radians((lat0_deg + lat1_deg) / 2)
+
+                # Fewer, wider longitude tiles near the poles so every tile
+                # covers roughly the same physical area on the sphere,
+                # instead of cramming grid_size tiles into a shrinking ring.
+                num_lon = max(1, round(grid_size * math.cos(lat_mid)))
+                lon_width_deg = 360.0 / num_lon
+
+                for j in range(num_lon):
+                    lon0_deg = j * lon_width_deg
+                    lon1_deg = (j + 1) * lon_width_deg
+                    lon_mid_deg = (lon0_deg + lon1_deg) / 2
+
+                    # Sample the underlying terrain data at this tile's center
+                    tx = int((lon_mid_deg / 360.0) * grid_size) % grid_size
+                    terrain = grid[tx][ty]
+
+                    lat0, lat1 = math.radians(lat0_deg), math.radians(lat1_deg)
+                    lon0, lon1 = math.radians(lon0_deg), math.radians(lon1_deg)
+
+                    center_point = sphere_point(lat_mid, math.radians(lon_mid_deg))
+                    _, _, center_rz = rotate_point(center_point, angle_x, angle_y)
+                    if center_rz >= 0:
+                        continue  # facing away from us
+
+                    corners = [
+                        sphere_point(lat0, lon0),
+                        sphere_point(lat0, lon1),
+                        sphere_point(lat1, lon1),
+                        sphere_point(lat1, lon0),
+                    ]
+
+                    screen_points = []
+                    for corner in corners:
+                        rx, ry, rz = rotate_point(corner, angle_x, angle_y)
+                        sx, sy, _ = project_rotated(rx, ry, rz, distance=planet_view_distance, scale=scale_factor)
+                        screen_points.append((center_x + sx, center_y + sy))
+
+                    color = TERRAIN_COLORS.get(terrain, (200, 200, 200))
+                    tiles_to_draw.append((center_rz, screen_points, color))
+
+            tiles_to_draw.sort(key=lambda t: -t[0])
+            for depth, screen_points, color in tiles_to_draw:
+                pygame.draw.polygon(screen, color, screen_points)
 
         pygame.display.flip()
         clock.tick(60)
